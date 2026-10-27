@@ -7,23 +7,15 @@ Output:   output/leads_YYYY-MM-DD.csv
 Run:      python3 scraper.py
 """
 
-import csv, hashlib, os, re, time, json, random
-from datetime import datetime, timedelta
+import csv, hashlib, os, re, time
+from datetime import datetime
 from bs4 import BeautifulSoup
 
 OUTPUT_DIR = "./output"
 SEEN_FILE  = "./output/seen_ids.txt"
 DEBUG_DIR  = "./debug"
 
-SLEEP_MIN = 3
-SLEEP_MAX = 7
-
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.208 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.208 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.208 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-]
+POLITE_DELAY_SECONDS = 3
 
 PHONE_RE = re.compile(r"(\(?\d{3}\)?[\s\-\.]?\d{3}[\s\-\.]?\d{4})")
 EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
@@ -153,29 +145,14 @@ def make_lead(**kw):
     }
 
 def make_browser(playwright):
-    ua = random.choice(USER_AGENTS)
-    b  = playwright.chromium.launch(
-        headless=True,
-        args=["--no-sandbox","--disable-blink-features=AutomationControlled",
-              "--disable-dev-shm-usage"]
-    )
-    ctx = b.new_context(
-        user_agent=ua,
-        viewport={"width": random.randint(1200,1440),
-                  "height": random.randint(700,900)},
-        locale="en-US",
-        timezone_id="America/New_York",
-        ignore_https_errors=True,
-    )
-    ctx.add_init_script(
-        "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
-    )
+    """Use a standard browser context; do not disguise automation or bypass TLS."""
+    b = playwright.chromium.launch(headless=True)
+    ctx = b.new_context()
     return b, ctx.new_page()
 
 def sleep():
-    time.sleep(random.uniform(SLEEP_MIN, SLEEP_MAX))
-
-os.makedirs(DEBUG_DIR, exist_ok=True)
+    """Apply a fixed courtesy delay between requests."""
+    time.sleep(POLITE_DELAY_SECONDS)
 
 # ── SOURCE 1: CRAIGSLIST BY OWNER ─────────────────────────────
 CRAIGSLIST_SEARCHES = [
@@ -191,15 +168,18 @@ BROKER_WORDS = re.compile(
     r"sotheby|engel|exp realty)\b", re.IGNORECASE
 )
 
-def scrape_craigslist(page):
+def scrape_craigslist(page, cities=None, limit=None):
     leads = []
-    for city, url in CRAIGSLIST_SEARCHES:
+    searches = [(city, url) for city, url in CRAIGSLIST_SEARCHES
+                if not cities or city in cities]
+    for city, url in searches:
+        if limit is not None and len(leads) >= limit:
+            break
         print(f"  → Craigslist [{city}]")
         try:
             page.goto(url, timeout=30000, wait_until="domcontentloaded")
             sleep()
-            page.mouse.wheel(0, random.randint(200,500))
-            time.sleep(1.5)
+            time.sleep(2)
 
             html = page.content()
             with open(f"{DEBUG_DIR}/cl_{city.replace(' ','_')}.html","w",
@@ -211,6 +191,8 @@ def scrape_craigslist(page):
             print(f"    Found {len(items)} listings")
 
             for item in items:
+                if limit is not None and len(leads) >= limit:
+                    break
                 try:
                     # Title + link
                     a = item.select_one("a.posting-title, a.result-title")
@@ -235,7 +217,7 @@ def scrape_craigslist(page):
                     phone, email, description, owner_name = "", "", "", ""
                     try:
                         page.goto(link, timeout=25000, wait_until="domcontentloaded")
-                        time.sleep(random.uniform(1.5, 3))
+                        time.sleep(2)
                         detail_html = page.content()
                         detail_soup = BeautifulSoup(detail_html, "lxml")
                         detail_text = detail_soup.get_text(" ")
@@ -295,9 +277,13 @@ FSBO_SEARCHES = [
     ("Hialeah",         "https://www.forsalebyowner.com/real-estate/fl/hialeah/"),
 ]
 
-def scrape_forsalebyowner(page):
+def scrape_forsalebyowner(page, cities=None, limit=None):
     leads = []
-    for city, url in FSBO_SEARCHES:
+    searches = [(city, url) for city, url in FSBO_SEARCHES
+                if not cities or city in cities]
+    for city, url in searches:
+        if limit is not None and len(leads) >= limit:
+            break
         print(f"  → ForSaleByOwner.com [{city}]")
         try:
             page.goto(url, timeout=30000, wait_until="domcontentloaded")
@@ -316,6 +302,8 @@ def scrape_forsalebyowner(page):
             print(f"    Found {len(listings)} listings")
 
             for listing in listings:
+                if limit is not None and len(leads) >= limit:
+                    break
                 try:
                     # Title / address
                     addr_tag = listing.select_one(
@@ -350,7 +338,7 @@ def scrape_forsalebyowner(page):
                     if link:
                         try:
                             page.goto(link, timeout=25000, wait_until="domcontentloaded")
-                            time.sleep(random.uniform(2, 4))
+                            time.sleep(2)
                             d_html = page.content()
                             d_soup = BeautifulSoup(d_html, "lxml")
                             d_text = d_soup.get_text(" ")
@@ -364,7 +352,7 @@ def scrape_forsalebyowner(page):
                             email = extract_email(d_text)
 
                             page.go_back()
-                            time.sleep(1.5)
+                            time.sleep(2)
                         except Exception:
                             pass
 
@@ -407,9 +395,13 @@ BYOWNER_SEARCHES = [
     ("Palm Beach",    "https://www.byowner.com/buy/fl/west-palm-beach-real-estate/"),
 ]
 
-def scrape_byowner(page):
+def scrape_byowner(page, cities=None, limit=None):
     leads = []
-    for city, url in BYOWNER_SEARCHES:
+    searches = [(city, url) for city, url in BYOWNER_SEARCHES
+                if not cities or city in cities]
+    for city, url in searches:
+        if limit is not None and len(leads) >= limit:
+            break
         print(f"  → ByOwner.com [{city}]")
         try:
             page.goto(url, timeout=30000, wait_until="domcontentloaded")
@@ -428,6 +420,8 @@ def scrape_byowner(page):
             print(f"    Found {len(listings)} listings")
 
             for listing in listings:
+                if limit is not None and len(leads) >= limit:
+                    break
                 try:
                     a = listing.select_one("a[href]")
                     if not a: continue
@@ -444,12 +438,12 @@ def scrape_byowner(page):
                     if link:
                         try:
                             page.goto(link, timeout=25000, wait_until="domcontentloaded")
-                            time.sleep(random.uniform(2, 4))
+                            time.sleep(2)
                             d_text = BeautifulSoup(page.content(), "lxml").get_text(" ")
                             phone  = extract_phone(d_text)
                             email  = extract_email(d_text)
                             description = d_text[:400]
-                            page.go_back(); time.sleep(1.5)
+                            page.go_back(); time.sleep(2)
                         except Exception:
                             pass
 
@@ -493,23 +487,20 @@ def print_summary(leads):
 
 
 # ── MAIN ──────────────────────────────────────────────────────
-def main():
-    print(f"\n=== South Florida Lead Scraper v4 ===")
-    print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
-    print("  Sources:  Craigslist + ForSaleByOwner.com + ByOwner.com")
-    print("  Filters:  Heir/Estate | Expired | Motivated | AS-IS | New\n")
+SOURCE_ADAPTERS = {
+    "craigslist": ("Craigslist", scrape_craigslist, CRAIGSLIST_SEARCHES),
+    "forsalebyowner": ("ForSaleByOwner.com", scrape_forsalebyowner, FSBO_SEARCHES),
+    "byowner": ("ByOwner.com", scrape_byowner, BYOWNER_SEARCHES),
+}
+SUPPORTED_CITIES = sorted({city for _, _, searches in SOURCE_ADAPTERS.values()
+                           for city, _ in searches})
 
-    seen      = load_seen()
-    all_leads = []
 
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        print("[!] Run: pip install playwright && playwright install chromium")
-        return
+def main(argv=None):
+    """Delegate CLI handling to the isolated, dry-run-first worker."""
+    from worker.leadforge_worker import main as worker_main
+    return worker_main(argv)
 
-    with sync_playwright() as p:
-        browser, page = make_browser(p)
 
-        # Warm up
-        print("  Warming 
+if __name__ == "__main__":
+    raise SystemExit(main())
