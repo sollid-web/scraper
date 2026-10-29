@@ -1,0 +1,25 @@
+service:
+  type: web
+  name: leadforge-worker
+  env: docker
+  plan: free
+
+  dockerfilePath: ./worker/Dockerfile
+
+  # Health check path
+  healthCheckPath: /health
+  healthCheckTerminateWaitSeconds: 5
+
+  # Environment variables — mark these as required at Render deploy time
+  envVars:
+    LEADFORGE_WORKER_TOKEN:
+      generateValue: true
+      fromSecret: LEADFORGE_WORKER_TOKEN_SECRET
+    LEADFORGE_ARTIFACT_DIR: /data/artifacts
+    LEADFORGE_WORKER_PORT: 8080
+
+  # Auto-deploy on push
+  autoDeploy: true
+
+  # Log and metrics
+  # autoRefreshEnabled: true
