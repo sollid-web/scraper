@@ -10,6 +10,9 @@ import leadforge_worker as worker
 
 
 class WorkerTests(unittest.TestCase):
+    def test_manifest_headers_are_unique(self):
+        self.assertEqual(len(worker.LEADFORGE_FIELDS), len(set(worker.LEADFORGE_FIELDS)))
+
     def base_config(self, output, **overrides):
         config = {
             "country": "US",
@@ -97,10 +100,46 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(rows[0]["currency"], "USD")
             self.assertEqual(rows[0]["property_type"], "other")
             self.assertEqual(rows[0]["poster_type"], "OWNER_UNVERIFIED")
-            self.assertIn("not independently verified", rows[0]["poster_evidence"])
+            self.assertIn("human verification", rows[0]["poster_evidence"])
             self.assertEqual(rows[0]["source_url"], "https://example.invalid/one")
             self.assertEqual(events[0]["event"], "run_started")
             self.assertEqual(events[-1]["event"], "run_completed")
+
+    def test_source_specific_owner_signal_is_only_an_unverified_candidate(self):
+        for source in ("craigslist", "forsalebyowner", "byowner"):
+            result = worker.scraper.classify_poster(source, "A home for sale")
+            self.assertEqual(result["decision"], "owner_candidate")
+            self.assertEqual(result["poster_type"], "OWNER_UNVERIFIED")
+            self.assertIn("human verification", result["poster_evidence"])
+
+    def test_agent_and_broker_evidence_rejects_candidate_even_on_owner_source(self):
+        for source in ("craigslist", "forsalebyowner", "byowner"):
+            result = worker.scraper.classify_poster(
+                source, "Home for sale", "Listed by a licensed real estate agent at Compass Real Estate"
+            )
+            self.assertEqual(result["decision"], "reject_agent")
+            self.assertEqual(result["poster_type"], "AGENT")
+
+    def test_owner_no_agent_disclaimer_is_not_misclassified_as_agent(self):
+        result = worker.scraper.classify_poster("craigslist", "Home for sale", "No agents please; owner selling directly.")
+        self.assertEqual(result["decision"], "owner_candidate")
+
+    def test_unknown_source_is_held_and_contact_fields_are_removed(self):
+        result = worker.scraper.classify_poster("unknown", "Home for sale")
+        self.assertEqual(result["decision"], "hold_ambiguous")
+        record = {
+            "source": "Unknown", "title": "Home for sale", "link": "https://example.invalid/1",
+            "owner_name": "Seller Name", "email": "seller@example.invalid", "phone": "3055550100",
+        }
+        normalized = worker.normalize_lead(record, "craigslist", "run-a")
+        # An allowlisted adapter still supplies source-level owner evidence, but
+        # this direct test verifies no caller-provided contact leaks on a reject.
+        rejected = worker.normalize_lead({**record, "poster_decision": "reject_agent"}, "craigslist", "run-a")
+        self.assertEqual(normalized["poster_decision"], "owner_candidate")
+        self.assertEqual(rejected["poster_decision"], "reject_agent")
+        self.assertEqual(rejected["phone"], "")
+        self.assertEqual(rejected["email"], "")
+        self.assertEqual(rejected["owner_name"], "")
 
     def test_error_status_and_event_when_injected_adapter_fails(self):
         with tempfile.TemporaryDirectory() as tempdir:

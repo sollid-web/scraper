@@ -1,6 +1,7 @@
 """Private worker HTTP dispatch validation tests; no sockets or adapters are used."""
 import unittest
 import uuid
+from unittest.mock import patch
 
 import worker_api
 
@@ -21,6 +22,7 @@ class WorkerApiValidationTests(unittest.TestCase):
             "propertyType": "all",
             "listingIntent": "sale",
             "resultLimit": 25,
+            "liveCollectionEnabled": False,
         }
         config.update(config_overrides)
         return {
@@ -31,8 +33,9 @@ class WorkerApiValidationTests(unittest.TestCase):
         }
 
     def test_valid_approved_dispatch_is_normalized_without_leaking_reference(self):
-        body = self.request_body()
-        dispatch, error = worker_api._validate_dispatch(body)
+        body = self.request_body(liveCollectionEnabled=True)
+        with patch.dict(worker_api.os.environ, {"LEADFORGE_WORKER_LIVE_COLLECTION_ENABLED": "true"}):
+            dispatch, error = worker_api._validate_dispatch(body)
         self.assertIsNone(error)
         self.assertEqual(dispatch["run_id"], body["runId"])
         self.assertEqual(dispatch["normalized"]["sources"], ["forsalebyowner"])
@@ -41,6 +44,27 @@ class WorkerApiValidationTests(unittest.TestCase):
         self.assertTrue(dispatch["normalized"]["collect"])
         self.assertEqual(dispatch["normalized"]["authorization_ref"], "APPROVAL-123")
         self.assertTrue(dispatch["normalized"]["output"].endswith(body["runId"] + ".csv"))
+
+    def test_dry_run_is_the_default_even_with_authorization_reference(self):
+        body = self.request_body()
+        with patch.dict(worker_api.os.environ, {"LEADFORGE_WORKER_LIVE_COLLECTION_ENABLED": "false"}):
+            dispatch, error = worker_api._validate_dispatch(body)
+        self.assertIsNone(error)
+        self.assertFalse(dispatch["normalized"]["collect"])
+
+    def test_live_collection_requires_both_app_and_worker_switches(self):
+        cases = [
+            (False, "true", False),
+            (True, "false", False),
+            (True, "true", True),
+        ]
+        for requested_live, worker_flag, expected in cases:
+            with self.subTest(requested_live=requested_live, worker_flag=worker_flag):
+                body = self.request_body(liveCollectionEnabled=requested_live)
+                with patch.dict(worker_api.os.environ, {"LEADFORGE_WORKER_LIVE_COLLECTION_ENABLED": worker_flag}):
+                    dispatch, error = worker_api._validate_dispatch(body)
+                self.assertIsNone(error)
+                self.assertEqual(dispatch["normalized"]["collect"], expected)
 
     def test_rejects_unapproved_source_or_missing_confirmation(self):
         for changes in (

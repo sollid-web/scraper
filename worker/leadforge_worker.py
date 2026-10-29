@@ -33,13 +33,13 @@ ALL_CITIES = sorted(set().union(*SOURCE_CITIES.values()))
 LEAD_FIELDS = [
     "id", "lead_type", "type", "source", "city", "title", "price",
     "beds_baths", "location", "date_posted", "link", "owner_name",
-    "phone", "email", "description",
+    "phone", "email", "description", "poster_decision",
+    "poster_decision_reason", "poster_evidence",
 ]
 MANIFEST_FIELDS = LEAD_FIELDS + ["run_id"]
 LEADFORGE_FIELDS = MANIFEST_FIELDS + [
     "source_name", "source_url", "external_id", "country_code", "region",
-    "currency", "listing_type", "property_type", "poster_type",
-    "poster_evidence", "published_at",
+    "currency", "listing_type", "property_type", "poster_type", "published_at",
 ]
 
 
@@ -133,9 +133,39 @@ def normalize_lead(record: dict, source_key: str, run_id: str) -> dict:
             (row["source"] + "\0" + (row["link"] or row["title"])).encode("utf-8")
         ).hexdigest()[:12]
     row["run_id"] = run_id
-    # The configured adapters only search owner/FSBO paths in Florida and do
-    # not reliably classify property type. Preserve that as an unverified
-    # source claim, never as independent owner verification.
+    classification = scraper.classify_poster(
+        source_key,
+        str(record.get("title") or ""),
+        str(record.get("description") or ""),
+        str(record.get("poster_label") or ""),
+    )
+    supplied_decision = str(record.get("poster_decision") or "").strip()
+    decision = "reject_agent" if classification["decision"] == "reject_agent" else (
+        supplied_decision if supplied_decision in {"reject_agent", "owner_candidate", "hold_ambiguous"}
+        else str(classification["decision"])
+    )
+    if decision == "reject_agent":
+        poster_type = "AGENT"
+        decision_reason = str(record.get("poster_decision_reason") or classification["reason_code"])
+        evidence = str(record.get("poster_evidence") or ";".join(classification["evidence_codes"]))
+    elif decision == "hold_ambiguous":
+        poster_type = "UNKNOWN"
+        decision_reason = str(record.get("poster_decision_reason") or classification["reason_code"])
+        evidence = str(record.get("poster_evidence") or ";".join(classification["evidence_codes"]))
+    else:
+        poster_type = "OWNER_UNVERIFIED"
+        decision = "owner_candidate"
+        decision_reason = str(record.get("poster_decision_reason") or classification["reason_code"])
+        evidence = str(record.get("poster_evidence") or classification["poster_evidence"])
+
+    if decision != "owner_candidate":
+        # Agent and ambiguous records are not contact leads. Preserve only
+        # enough public metadata and reason codes for the exception queue.
+        row["owner_name"] = ""
+        row["phone"] = ""
+        row["email"] = ""
+        row["description"] = ""
+
     row.update({
         "source_name": row["source"],
         "source_url": row["link"],
@@ -145,8 +175,10 @@ def normalize_lead(record: dict, source_key: str, run_id: str) -> dict:
         "currency": "USD",
         "listing_type": "sale",
         "property_type": "other",
-        "poster_type": "OWNER_UNVERIFIED",
-        "poster_evidence": "Result came from a configured owner/FSBO search adapter; contact and owner identity are not independently verified.",
+        "poster_type": poster_type,
+        "poster_decision": decision,
+        "poster_decision_reason": decision_reason,
+        "poster_evidence": evidence,
         "published_at": row["date_posted"],
     })
     return row

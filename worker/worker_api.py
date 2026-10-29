@@ -62,6 +62,9 @@ def _validate_dispatch(body: dict) -> tuple[dict | None, str | None]:
     config = body.get("configuration")
     if not isinstance(config, dict):
         return None, "configuration must be an object"
+    requested_live = config.get("liveCollectionEnabled", False)
+    if not isinstance(requested_live, bool):
+        return None, "liveCollectionEnabled must be a boolean"
     if config.get("countryCode") != "US" or config.get("listingIntent") != "sale":
         return None, "only configured US sale searches are supported"
     if config.get("propertyType") != "all":
@@ -97,7 +100,7 @@ def _validate_dispatch(body: dict) -> tuple[dict | None, str | None]:
         "limit": limit,
         "output": str(ARTIFACT_DIR / f"{run_id}.csv"),
         "run_id": run_id,
-        "collect": True,
+        "collect": requested_live and os.environ.get("LEADFORGE_WORKER_LIVE_COLLECTION_ENABLED", "false").lower() == "true",
         "authorization_ref": authorization_reference,
         "_source_explicit": True,
     }
@@ -154,6 +157,13 @@ def _run_dispatch(dispatch: dict) -> None:
         # The CLI worker emits no owner-contact values in events; records stay
         # only in the private CSV artifact until a manager downloads it.
         status, records, _worker_run_id = worker.run_worker(config, event_sink=emit)
+        if status == "dry_run":
+            _post_event(callback_url, {
+                "event": "completed",
+                "progress": {"stage": "dry_run", "message": "Configuration validated; no source was contacted", "rowsSeen": 0},
+                "counts": {"discovered": 0, "imported": 0, "duplicates": 0, "rejected": 0, "contactsFound": 0},
+            })
+            return
         artifact = ARTIFACT_DIR / f"{run_id}.csv"
         if artifact.is_file():
             try:

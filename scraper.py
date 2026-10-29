@@ -10,6 +10,7 @@ Run:      python3 scraper.py
 import csv, hashlib, os, re, time
 from datetime import datetime
 from bs4 import BeautifulSoup
+from worker.poster_filter import classify_poster
 
 OUTPUT_DIR = "./output"
 SEEN_FILE  = "./output/seen_ids.txt"
@@ -142,6 +143,9 @@ def make_lead(**kw):
         "phone":       kw.get("phone", ""),
         "email":       kw.get("email", ""),
         "description": kw.get("description", ""),
+        "poster_decision": kw.get("poster_decision", ""),
+        "poster_decision_reason": kw.get("poster_decision_reason", ""),
+        "poster_evidence": kw.get("poster_evidence", ""),
     }
 
 def make_browser(playwright):
@@ -202,8 +206,16 @@ def scrape_craigslist(page, cities=None, limit=None):
                     if not link.startswith("http"):
                         link = "https://miami.craigslist.org" + link
 
-                    # Skip broker listings
-                    if BROKER_WORDS.search(title): continue
+                    decision = classify_poster("craigslist", title)
+                    if decision["decision"] == "reject_agent":
+                        leads.append(make_lead(
+                            id=uid(link), source="Craigslist", city=city,
+                            title=title, location=city + ", FL", link=link,
+                            poster_decision=decision["decision"],
+                            poster_decision_reason=decision["reason_code"],
+                            poster_evidence=";".join(decision["evidence_codes"]),
+                        ))
+                        continue
 
                     # Price
                     price_tag = item.select_one(".priceinfo, .result-price")
@@ -225,11 +237,23 @@ def scrape_craigslist(page, cities=None, limit=None):
                         body = detail_soup.select_one("#postingbody")
                         description = body.get_text(" ", strip=True)[:400] if body else ""
 
-                        phone = extract_phone(detail_text)
-                        email = extract_email(detail_text)
-
                         name_tag = detail_soup.select_one(".reply_options b")
                         owner_name = name_tag.get_text(strip=True) if name_tag else ""
+
+                        decision = classify_poster("craigslist", title, detail_text, owner_name)
+                        if decision["decision"] != "owner_candidate":
+                            leads.append(make_lead(
+                                id=uid(link), source="Craigslist", city=city,
+                                title=title, location=city + ", FL", link=link,
+                                poster_decision=decision["decision"],
+                                poster_decision_reason=decision["reason_code"],
+                                poster_evidence=";".join(decision["evidence_codes"]),
+                            ))
+                            page.go_back()
+                            continue
+
+                        phone = extract_phone(detail_text)
+                        email = extract_email(detail_text)
 
                         page.go_back()
                         time.sleep(1)
@@ -252,6 +276,9 @@ def scrape_craigslist(page, cities=None, limit=None):
                         phone       = phone,
                         email       = email,
                         description = description,
+                        poster_decision=decision["decision"],
+                        poster_decision_reason=decision["reason_code"],
+                        poster_evidence=";".join(decision["evidence_codes"]),
                     ))
                     sleep()
 
@@ -313,6 +340,17 @@ def scrape_forsalebyowner(page, cities=None, limit=None):
                     title = addr_tag.get_text(strip=True)
                     if not title or len(title) < 5: continue
 
+                    decision = classify_poster("forsalebyowner", title)
+                    if decision["decision"] == "reject_agent":
+                        leads.append(make_lead(
+                            id=uid(title), source="ForSaleByOwner.com", city=city,
+                            title=title, location=f"{city}, FL",
+                            poster_decision=decision["decision"],
+                            poster_decision_reason=decision["reason_code"],
+                            poster_evidence=";".join(decision["evidence_codes"]),
+                        ))
+                        continue
+
                     # Link
                     a    = listing.select_one("a[href]")
                     link = a["href"] if a else ""
@@ -347,6 +385,18 @@ def scrape_forsalebyowner(page, cities=None, limit=None):
                                 ".description, .listing-description, [class*='description']"
                             )
                             description = desc_tag.get_text(" ", strip=True)[:400] if desc_tag else d_text[:400]
+
+                            decision = classify_poster("forsalebyowner", title, d_text)
+                            if decision["decision"] != "owner_candidate":
+                                page.go_back()
+                                leads.append(make_lead(
+                                    id=uid(link or title), source="ForSaleByOwner.com", city=city,
+                                    title=title, location=f"{city}, FL", link=link,
+                                    poster_decision=decision["decision"],
+                                    poster_decision_reason=decision["reason_code"],
+                                    poster_evidence=";".join(decision["evidence_codes"]),
+                                ))
+                                continue
 
                             phone = extract_phone(d_text)
                             email = extract_email(d_text)
@@ -430,6 +480,17 @@ def scrape_byowner(page, cities=None, limit=None):
                     if not link.startswith("http"):
                         link = "https://www.byowner.com" + link
 
+                    decision = classify_poster("byowner", title)
+                    if decision["decision"] == "reject_agent":
+                        leads.append(make_lead(
+                            id=uid(link or title), source="ByOwner.com", city=city,
+                            title=title, location=f"{city}, FL", link=link,
+                            poster_decision=decision["decision"],
+                            poster_decision_reason=decision["reason_code"],
+                            poster_evidence=";".join(decision["evidence_codes"]),
+                        ))
+                        continue
+
                     price_tag  = listing.select_one("[class*='price']")
                     price      = price_tag.get_text(strip=True) if price_tag else "N/A"
                     date_posted = datetime.now().strftime("%Y-%m-%d")
@@ -440,9 +501,20 @@ def scrape_byowner(page, cities=None, limit=None):
                             page.goto(link, timeout=25000, wait_until="domcontentloaded")
                             time.sleep(2)
                             d_text = BeautifulSoup(page.content(), "lxml").get_text(" ")
+                            description = d_text[:400]
+                            decision = classify_poster("byowner", title, d_text)
+                            if decision["decision"] != "owner_candidate":
+                                page.go_back(); time.sleep(2)
+                                leads.append(make_lead(
+                                    id=uid(link or title), source="ByOwner.com", city=city,
+                                    title=title, location=f"{city}, FL", link=link,
+                                    poster_decision=decision["decision"],
+                                    poster_decision_reason=decision["reason_code"],
+                                    poster_evidence=";".join(decision["evidence_codes"]),
+                                ))
+                                continue
                             phone  = extract_phone(d_text)
                             email  = extract_email(d_text)
-                            description = d_text[:400]
                             page.go_back(); time.sleep(2)
                         except Exception:
                             pass
