@@ -45,6 +45,48 @@ class WorkerApiValidationTests(unittest.TestCase):
         self.assertEqual(dispatch["normalized"]["authorization_ref"], "APPROVAL-123")
         self.assertTrue(dispatch["normalized"]["output"].endswith(body["runId"] + ".csv"))
 
+    def test_canonical_keys_and_slug_suffix_aliases_normalize_to_worker_keys(self):
+        cases = [
+            ("forsalebyowner", "forsalebyowner", "ForSaleByOwner.com", "https://www.forsalebyowner.com/"),
+            ("forsalebyowner-com", "forsalebyowner", "ForSaleByOwner.com", "https://www.forsalebyowner.com/"),
+            ("byowner", "byowner", "ByOwner.com", "https://www.byowner.com/"),
+            ("byowner-com", "byowner", "ByOwner.com", "https://www.byowner.com/"),
+        ]
+        for alias, canonical, display_name, source_url in cases:
+            with self.subTest(alias=alias):
+                body = self.request_body(
+                    sourceKey=alias,
+                    sourceName=display_name,
+                    sourceUrl=source_url,
+                )
+                dispatch, error = worker_api._validate_dispatch(body)
+                self.assertIsNone(error)
+                self.assertEqual(dispatch["normalized"]["sources"], [canonical])
+                self.assertFalse(dispatch["normalized"]["collect"])
+
+    def test_slug_suffix_aliases_still_require_exact_host_and_display_name(self):
+        cases = [
+            (
+                "forsalebyowner-com", "ForSaleByOwner.com",
+                "https://www.forsalebyowner.com/", "https://evil.example/",
+            ),
+            (
+                "byowner-com", "ByOwner.com",
+                "https://www.byowner.com/", "https://evil.example/",
+            ),
+        ]
+        for alias, display_name, valid_url, invalid_url in cases:
+            with self.subTest(alias=alias, mismatch="host"):
+                _dispatch, error = worker_api._validate_dispatch(self.request_body(
+                    sourceKey=alias, sourceName=display_name, sourceUrl=invalid_url,
+                ))
+                self.assertIn("host does not match", error)
+            with self.subTest(alias=alias, mismatch="name"):
+                _dispatch, error = worker_api._validate_dispatch(self.request_body(
+                    sourceKey=alias, sourceName="Some feed", sourceUrl=valid_url,
+                ))
+                self.assertIn("source name must match", error)
+
     def test_dry_run_is_the_default_even_with_authorization_reference(self):
         body = self.request_body()
         with patch.dict(worker_api.os.environ, {"LEADFORGE_WORKER_LIVE_COLLECTION_ENABLED": "false"}):

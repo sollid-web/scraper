@@ -29,6 +29,10 @@ SOURCE_HOSTS = {
     "forsalebyowner": "forsalebyowner.com",
     "byowner": "byowner.com",
 }
+SOURCE_KEY_ALIASES = {
+    "forsalebyowner-com": "forsalebyowner",
+    "byowner-com": "byowner",
+}
 CITY_LABELS = {"Miami", "Fort Lauderdale", "West Palm Beach", "Broward", "Boca Raton", "Hialeah", "Palm Beach"}
 MAX_REQUEST_BYTES = 64 * 1024
 LOCK = threading.Lock()
@@ -72,6 +76,7 @@ def _validate_dispatch(body: dict) -> tuple[dict | None, str | None]:
     if config.get("sourceType") not in {"approved_feed", "partner_feed"} or config.get("sourceApproved") is not True or config.get("sourceActive") is not True or config.get("authorizationConfirmed") is not True:
         return None, "an approved, active source and explicit operator authorization are required"
     source_key = config.get("sourceKey")
+    source_key = SOURCE_KEY_ALIASES.get(source_key, source_key)
     expected_host = SOURCE_HOSTS.get(source_key)
     if not expected_host:
         return None, "unsupported source adapter"
